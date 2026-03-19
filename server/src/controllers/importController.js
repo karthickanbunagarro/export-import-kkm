@@ -8,6 +8,7 @@ const importController = ({ strapi }) => ({
     if (!collectionName) {
       return ctx.throw(400, 'collectionName is required');
     }
+
     if (!rows || !Array.isArray(rows)) {
       return ctx.throw(400, 'Invalid data: rows must be an array');
     }
@@ -15,11 +16,14 @@ const importController = ({ strapi }) => ({
     const modelName = `api::${collectionName}.${collectionName}`;
 
     const excludedKeys = [
+      'id',
       'createdAt',
       'updatedAt',
       'publishedAt',
       'createdBy',
-      'updatedBy'
+      'updatedBy',
+      'locale',
+      'localizations',
     ];
 
     const tryParseJSON = (value) => {
@@ -40,9 +44,41 @@ const importController = ({ strapi }) => ({
     const isEmptyValue = (value) => {
       if (value == null) return true;
       if (typeof value === 'string' && value.trim() === '') return true;
-      if (Array.isArray(value) && value.length === 0) return true;
       if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) return true;
       return false;
+    };
+
+    const sanitizeNestedValue = (value) => {
+      const parsedValue = tryParseJSON(value);
+
+      if (Array.isArray(parsedValue)) {
+        return parsedValue
+          .map((item) => sanitizeNestedValue(item))
+          .filter((item) => item !== undefined);
+      }
+
+      if (parsedValue && typeof parsedValue === 'object') {
+        const nestedObj = {};
+
+        Object.keys(parsedValue).forEach((key) => {
+          if (excludedKeys.includes(key) || key === 'documentId') {
+            return;
+          }
+
+          const nestedValue = sanitizeNestedValue(parsedValue[key]);
+          if (nestedValue !== undefined) {
+            nestedObj[key] = nestedValue;
+          }
+        });
+
+        return Object.keys(nestedObj).length ? nestedObj : undefined;
+      }
+
+      if (isEmptyValue(parsedValue)) {
+        return undefined;
+      }
+
+      return parsedValue;
     };
 
     let importedCount = 0;
@@ -53,11 +89,15 @@ const importController = ({ strapi }) => ({
       try {
         const sanitizedRow = Object.keys(row).reduce((acc, key) => {
           if (!excludedKeys.includes(key)) {
-            let parsedValue = tryParseJSON(row[key]);
-            if (parsedValue && typeof parsedValue === 'object' && parsedValue.documentId) {
+            // keep top-level documentId for update matching
+            if (key === 'documentId') {
+              acc[key] = row[key];
               return acc;
             }
-            if (!isEmptyValue(parsedValue)) {
+
+            const parsedValue = sanitizeNestedValue(row[key]);
+
+            if (parsedValue !== undefined) {
               acc[key] = parsedValue;
             }
           }
@@ -69,16 +109,23 @@ const importController = ({ strapi }) => ({
             documentId: sanitizedRow.documentId,
             populate: '*',
           });
+
           if (existing) {
+            const updateData = { ...sanitizedRow };
+            delete updateData.documentId;
+
             await strapi.documents(modelName).update({
               documentId: sanitizedRow.documentId,
-              data: sanitizedRow,
+              data: updateData,
               populate: '*',
             });
             updatedCount++;
           } else {
+            const createData = { ...sanitizedRow };
+            delete createData.documentId;
+
             await strapi.documents(modelName).create({
-              data: sanitizedRow,
+              data: createData,
               populate: '*',
             });
             importedCount++;
